@@ -1,227 +1,169 @@
-from mfrc522 import MFRC522
-from machine import Pin, PWM
-import network
-import urequests
+from machine import Pin, WDT
 import time
 
-# ========================================
-# LED
-# ========================================
-led_green = Pin(2, Pin.OUT)
+from config import *
 
-# ========================================
-# SERVO
-# ========================================
-servo = PWM(Pin(13), freq=50)
+import display_manager as display
 
-# ========================================
-# SERVO FUNCTION
-# ========================================
-def set_angle(angle):
+import servo_lock as lock
 
-    duty = int((angle / 180) * 75 + 40)
-    servo.duty(duty)
+import rfid_reader
 
-# khóa mặc định
-set_angle(0)
+import network_manager
 
-# ========================================
-# WIFI STA
-# ========================================
-STA_SSID = ":v"
-STA_PASS = "ngocancut"
+import camera_manager
 
-# ========================================
-# AP MODE
-# ========================================
-AP_SSID = "ESP_GATEWAY"
-AP_PASS = "12345678"
+import security_manager
 
-# ========================================
-# SERVER CONFIG
-# ========================================
-SERVER_URL = "http://10.69.106.161:5000/upload"
+# ======================================
+# WATCHDOG
+# ======================================
 
-# ========================================
-# ESP32-CAM IP
-# ========================================
-CAM_IP = "192.168.4.2"
+wdt = WDT(timeout=10000)
 
-# ========================================
-# AUTHORIZED CARDS
-# ========================================
-AUTHORIZED_CARDS = [
-    3857600436,
-    2385517062
-]
+# ======================================
+# GPIO
+# ======================================
 
-# ========================================
-# WIFI APSTA
-# ========================================
-def start_wifi():
+led_green = Pin(4, Pin.OUT)
 
-    print("STARTING WIFI...")
+led_red = Pin(15, Pin.OUT)
 
-    # STA
-    sta = network.WLAN(network.STA_IF)
-    sta.active(True)
-    sta.connect(STA_SSID, STA_PASS)
+buzzer = Pin(26, Pin.OUT)
 
-    print("Connecting STA...")
+# ======================================
+# BUZZER
+# ======================================
 
-    timeout = 20
+def beep(delay=0.1, times=1):
 
-    while not sta.isconnected() and timeout > 0:
-        time.sleep(1)
-        print("...")
-        timeout -= 1
+    for _ in range(times):
 
-    if sta.isconnected():
-        print("STA OK")
-        print(sta.ifconfig())
-    else:
-        print("STA FAILED")
+        buzzer.on()
 
-    # AP
-    ap = network.WLAN(network.AP_IF)
+        time.sleep(delay)
 
-    ap.active(False)
-    time.sleep(1)
+        buzzer.off()
 
-    ap.active(True)
+        time.sleep(delay)
 
-    ap.config(
-        essid="ESP_GATEWAY"
+# ======================================
+# ACCESS GRANTED
+# ======================================
+
+def access_granted():
+
+    security_manager.access_success()
+
+    print("ACCESS GRANTED")
+
+    display.show(
+        "ACCESS OK",
+        "WELCOME"
     )
+
+    led_green.on()
+
+    beep(0.08, 1)
+
+    lock.unlock()
+
+    camera_manager.request_capture()
 
     time.sleep(3)
 
-    print("AP STARTED")
-    print(ap.ifconfig())
+    lock.lock()
 
-# ========================================
-# RFID RC522
-# ========================================
-rdr = MFRC522(
-    sck=18,
-    mosi=23,
-    miso=19,
-    rst=22,
-    cs=5
-)
+    led_green.off()
 
-# ========================================
-# REQUEST IMAGE FROM CAM
-# ========================================
-def request_capture():
+# ======================================
+# ACCESS DENIED
+# ======================================
 
-    try:
+def access_denied():
 
-        print("REQUEST CAMERA...")
+    print("ACCESS DENIED")
 
-        url = "http://{}/capture".format(CAM_IP)
+    display.show(
+        "ACCESS FAIL",
+        "TRY AGAIN"
+    )
 
-        response = urequests.get(url)
+    led_red.on()
 
-        if response.status_code == 200:
+    beep(0.2, 2)
 
-            image_data = response.content
+    time.sleep(1)
 
-            print("IMAGE RECEIVED")
-            print("SIZE:", len(image_data))
+    led_red.off()
 
-            upload_to_server(image_data)
+    if security_manager.access_failed():
 
-        else:
-            print("CAM ERROR:", response.status_code)
-
-        response.close()
-
-    except Exception as e:
-        print("CAPTURE ERROR:", e)
-
-
-# ========================================
-# UPLOAD IMAGE TO SERVER
-# ========================================
-def upload_to_server(image_data):
-
-    try:
-
-        print("UPLOADING...")
-
-        headers = {
-            "Content-Type": "image/jpeg"
-        }
-
-        response = urequests.post(
-            SERVER_URL,
-            data=image_data,
-            headers=headers
+        display.show(
+            "SYSTEM LOCK",
+            "WAIT 30 SEC"
         )
 
-        print("SERVER:", response.text)
-
-        response.close()
-
-    except Exception as e:
-        print("UPLOAD ERROR:", e)
-
-
-# ========================================
+# ======================================
 # MAIN
-# ========================================
+# ======================================
+
 def main():
 
-    start_wifi()
+    lock.lock()
 
-    print("SMART LOCK READY")
+    display.show(
+        "SMART LOCK",
+        "BOOTING..."
+    )
+
+    network_manager.connect_wifi()
+
+    display.show(
+        "READY",
+        "SCAN CARD"
+    )
 
     while True:
 
-        rdr.init()
+        wdt.feed()
 
-        stat, tag_type = rdr.request(rdr.REQIDL)
+        if security_manager.is_locked():
 
-        if stat == rdr.OK:
+            display.show(
+                "SYSTEM",
+                "LOCKED"
+            )
 
-            stat, uid = rdr.SelectTagSN()
+            time.sleep(1)
 
-            if stat == rdr.OK:
+            continue
 
-                card = int.from_bytes(bytes(uid), "little", False)
+        card = rfid_reader.read_card()
 
-                print("CARD ID:", card)
+        if card is not None:
 
-                # =========================
-                # AUTH CHECK
-                # =========================
-                if card in AUTHORIZED_CARDS:
+            print("CARD:", card)
 
-                    print("ACCESS GRANTED")
+            if card in AUTHORIZED_CARDS:
 
-                    led_green.on()
+                access_granted()
 
-                    # mở khóa
-                    set_angle(90)
+            else:
 
-                    # capture image
-                    request_capture()
+                access_denied()
 
-                    time.sleep(3)
+            display.show(
+                "READY",
+                "SCAN CARD"
+            )
 
-                    # khóa lại
-                    set_angle(0)
-
-                    led_green.off()
-
-                else:
-
-                    print("ACCESS DENIED")
+            time.sleep(2)
 
         time.sleep(0.2)
 
-# ========================================
+# ======================================
 # START
-# ========================================
+# ======================================
+
 main()

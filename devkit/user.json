@@ -1,0 +1,9 @@
+{
+  "cards": {
+    "3857600436": {"name": "Nguyen Van A", "role": "user"},
+    "2385517062": {"name": "Admin", "role": "admin"}
+  },
+  "max_fail_attempts": 5,
+  "lockout_time_sec": 30,
+  "auto_lock_delay_sec": 5
+}
